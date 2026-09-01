@@ -4,6 +4,8 @@ const { Server } = require('socket.io');
 const bodyParser = require('body-parser');
 const { kellyFraction, expectedValue } = require('./kelly');
 const { placeOrderOnBetfair, getAuthToken, DRY_RUN } = require('./bookmakers/betfair_adapter');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
@@ -23,6 +25,40 @@ const pendingRecommendations = {}; // recId -> recommendation
 // Live mode guard - starts false. Must be enabled with the correct token.
 let liveEnabled = false;
 
+// Mappings file (sourceMarketId -> canonical + betfair ids)
+const MAPPINGS_FILE = path.join(__dirname, 'mappings.json');
+let mappings = [];
+
+function loadMappings() {
+  try {
+    if (fs.existsSync(MAPPINGS_FILE)) {
+      const raw = fs.readFileSync(MAPPINGS_FILE, 'utf8');
+      mappings = JSON.parse(raw || '[]');
+    } else {
+      mappings = [];
+    }
+  } catch (err) {
+    console.error('Failed to load mappings:', err.message);
+    mappings = [];
+  }
+}
+
+function saveMappings() {
+  try {
+    fs.writeFileSync(MAPPINGS_FILE, JSON.stringify(mappings, null, 2), 'utf8');
+    return true;
+  } catch (err) {
+    console.error('Failed to save mappings:', err.message);
+    return false;
+  }
+}
+
+loadMappings();
+
+function findMappingForSource(source, sourceMarketId) {
+  return mappings.find(m => m.source === source && m.sourceMarketId === sourceMarketId) || null;
+}
+
 function recommendBet(eventId, market) {
   const b = market.decimalOdds - 1;
   const p = market.modelProbability;
@@ -41,7 +77,10 @@ function recommendBet(eventId, market) {
     stake: parseFloat(stake.toFixed(2)),
     ev: parseFloat(ev.toFixed(4)),
     status: 'pending',
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    // include source info for mapping
+    source: market.source || 'unknown',
+    sourceMarketId: market.sourceMarketId || market.selectionId
   };
   pendingRecommendations[recId] = rec;
   return rec;
@@ -73,6 +112,45 @@ app.post('/odds', (req, res) => {
 // Endpoint for client to list pending recommendations
 app.get('/recommendations', (req, res) => {
   res.json({ recommendations: Object.values(pendingRecommendations) });
+});
+
+// Mappings endpoints
+app.get('/mappings', (req, res) => {
+  res.json({ mappings });
+});
+
+app.post('/mappings', (req, res) => {
+  const m = req.body;
+  // required fields: source, sourceMarketId, canonicalEventId, canonicalSelectionId, betfairMarketId, betfairSelectionId
+  const required = ['source','sourceMarketId','canonicalEventId','canonicalSelectionId','betfairMarketId','betfairSelectionId'];
+  const missing = required.filter(k => !m[k]);
+  if (missing.length) return res.status(400).json({ status:'error', error: `missing fields: ${missing.join(',')}` });
+  // prevent duplicates
+  const existing = mappings.find(x => x.source===m.source && x.sourceMarketId===m.sourceMarketId);
+  if (existing) return res.status(409).json({ status:'error', error: 'mapping exists', mapping: existing });
+  const newMap = {
+    source: m.source,
+    sourceMarketId: m.sourceMarketId,
+    canonicalEventId: m.canonicalEventId,
+    canonicalSelectionId: m.canonicalSelectionId,
+    betfairMarketId: m.betfairMarketId,
+    betfairSelectionId: m.betfairSelectionId,
+    mappedAt: new Date().toISOString(),
+    metadata: m.metadata || {}
+  };
+  mappings.push(newMap);
+  if (!saveMappings()) return res.status(500).json({ status:'error', error:'failed to persist mapping' });
+  io.emit('mapping_added', newMap);
+  res.json({ status:'ok', mapping: newMap });
+});
+
+// Return unmapped pending recommendations (for admin UI)
+app.get('/unmapped', (req, res) => {
+  const unmapped = Object.values(pendingRecommendations).filter(rec => {
+    const map = findMappingForSource(rec.source, rec.sourceMarketId);
+    return !map;
+  }).slice(-200);
+  res.json({ unmapped });
 });
 
 // Endpoint to enable live mode. Requires a token stored in env LIVE_MODE_TOKEN and DRY_RUN=false.
@@ -114,12 +192,21 @@ app.post('/confirm_bet', async (req, res) => {
   try {
     let placeResult;
     if (bookmaker === 'betfair') {
+      // Try to find a mapping for this source -> betfair ids
+      const map = findMappingForSource(rec.source, rec.sourceMarketId);
+      let useMarketId = marketId || rec.eventId;
+      let useSelectionId = rec.selectionId;
+      if (map) {
+        useMarketId = map.betfairMarketId;
+        useSelectionId = map.betfairSelectionId;
+      }
+
       if (!liveEnabled) {
         // If live is not enabled, use existing DRY_RUN behavior from adapter
-        placeResult = await placeOrderOnBetfair(marketId || rec.eventId, rec.selectionId, rec.stake, rec.decimalOdds);
+        placeResult = await placeOrderOnBetfair(useMarketId, useSelectionId, rec.stake, rec.decimalOdds);
       } else {
         // liveEnabled==true and BETFAIR_DRY_RUN should be false per /enable_live checks
-        placeResult = await placeOrderOnBetfair(marketId || rec.eventId, rec.selectionId, rec.stake, rec.decimalOdds);
+        placeResult = await placeOrderOnBetfair(useMarketId, useSelectionId, rec.stake, rec.decimalOdds);
       }
     } else {
       placeResult = { simulated: true, status: 'UNSUPPORTED_BOOKMAKER' };

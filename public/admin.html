@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mappings Admin - Real-time Betting Assistant</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 16px; max-width: 980px; margin: 0 auto; }
+    input, select { padding: 8px; margin: 4px 0; width: 100%; }
+    .row { display:flex; gap:8px; }
+    .col { flex:1; }
+    button { padding:8px 12px; }
+    .card { border:1px solid #ddd; padding:8px; margin-bottom:8px; }
+  </style>
+</head>
+<body>
+  <h1>Mappings Admin</h1>
+  <p>This page lets you map source market IDs from BetPawa/Betway to canonical event/selection IDs and Betfair market/selection IDs.</p>
+
+  <h2>Unmapped Recommendations</h2>
+  <div id="unmapped"></div>
+
+  <h2>Existing Mappings</h2>
+  <div id="mappings"></div>
+
+  <h2>Add Mapping</h2>
+  <div>
+    <label>Source</label>
+    <select id="src"><option value="betpawa">betpawa</option><option value="betway">betway</option></select>
+    <label>Source Market ID</label>
+    <input id="srcId" />
+    <label>Canonical Event ID</label>
+    <input id="canEvent" />
+    <label>Canonical Selection ID</label>
+    <input id="canSel" />
+    <label>Betfair Market ID</label>
+    <input id="bfMarket" />
+    <label>Betfair Selection ID</label>
+    <input id="bfSel" />
+    <button onclick="addMapping()">Add Mapping</button>
+  </div>
+
+  <script>
+    async function loadUnmapped() {
+      const r = await fetch('/unmapped');
+      const j = await r.json();
+      const node = document.getElementById('unmapped');
+      if (!j.unmapped || j.unmapped.length===0) { node.innerHTML = '<i>None</i>'; return; }
+      node.innerHTML = j.unmapped.map(u => `<div class="card"><b>${u.selectionName}</b> (${u.selectionId})<br/>source: ${u.source}<br/>sourceMarketId: ${u.sourceMarketId}<br/>recId: ${u.recId}<br/><small>${u.createdAt}</small></div>`).join('');
+    }
+    async function loadMappings() {
+      const r = await fetch('/mappings');
+      const j = await r.json();
+      const node = document.getElementById('mappings');
+      if (!j.mappings || j.mappings.length===0) { node.innerHTML = '<i>None</i>'; return; }
+      node.innerHTML = j.mappings.map(m => `<div class="card"><b>${m.source}</b> - ${m.sourceMarketId}<br/>canonical: ${m.canonicalEventId} / ${m.canonicalSelectionId}<br/>betfair: ${m.betfairMarketId} / ${m.betfairSelectionId}<br/><small>mapped at ${m.mappedAt}</small></div>`).join('');
+    }
+    async function addMapping() {
+      const body = {
+        source: document.getElementById('src').value,
+        sourceMarketId: document.getElementById('srcId').value.trim(),
+        canonicalEventId: document.getElementById('canEvent').value.trim(),
+        canonicalSelectionId: document.getElementById('canSel').value.trim(),
+        betfairMarketId: document.getElementById('bfMarket').value.trim(),
+        betfairSelectionId: document.getElementById('bfSel').value.trim()
+      };
+      const r = await fetch('/mappings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      const j = await r.json();
+      if (j.status === 'ok') { alert('Mapping added'); loadMappings(); loadUnmapped(); }
+      else alert('Failed: ' + (j.error || JSON.stringify(j)));
+    }
+
+    loadUnmapped(); loadMappings();
+    setInterval(()=>{ loadUnmapped(); loadMappings(); }, 5000);
+  </script>
+</body>
+</html>
