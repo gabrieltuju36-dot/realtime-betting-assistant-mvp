@@ -1,0 +1,142 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Real-time Betting Assistant (Manual Confirm)</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 16px; max-width: 980px; margin: 0 auto; }
+    table { border-collapse: collapse; width: 100%; font-size: 14px; }
+    th, td { padding: 8px; border: 1px solid #ddd; }
+    button { padding: 10px 14px; font-size: 16px; border-radius: 6px; }
+    .pos { color: green; }
+    .neg { color: red; }
+    #liveBanner { background: #ffeeba; padding: 8px; border-radius: 6px; margin-bottom: 12px; }
+    @media (max-width: 600px) {
+      table, thead, tbody, th, td, tr { display: block; }
+      th { display: none; }
+      td { border: none; padding: 8px 0; }
+      td::before { font-weight: bold; content: attr(data-label); display:block; }
+    }
+  </style>
+</head>
+<body>
+  <h1>Real-time Betting Assistant</h1>
+  <div id="liveBanner" style="display:none"></div>
+  <div>Bankroll: <span id="bankroll">-</span></div>
+  <div style="margin-top:10px;">
+    <input id="liveToken" placeholder="Enter LIVE token to enable real mode" style="padding:8px; width:65%" />
+    <button onclick="enableLive()">Enable Live Mode</button>
+  </div>
+  <h2>Live Events</h2>
+  <div id="events"></div>
+  <h2>Pending Recommendations</h2>
+  <div id="pending"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    const eventsDiv = document.getElementById('events');
+    const bankrollEl = document.getElementById('bankroll');
+    const pendingDiv = document.getElementById('pending');
+    const liveBanner = document.getElementById('liveBanner');
+    const liveTokenInput = document.getElementById('liveToken');
+
+    const events = {};
+    const pending = {};
+    let liveEnabled = false;
+
+    function renderEvents() {
+      const parts = [];
+      for (const [eventId, ev] of Object.entries(events)) {
+        parts.push(`<h3>${ev.name} (${eventId})</h3>`);
+        parts.push('<table><tr><th>Selection</th><th>Odds</th><th>Model P</th><th>EV</th><th>Kelly</th><th>Stake</th><th>Action</th></tr>');
+        for (const m of Object.values(ev.markets)) {
+          const rec = m.recommendation || { ev: 0, kellyFraction: 0, stake: 0, recId: '' };
+          const evClass = rec.ev > 0 ? 'pos' : 'neg';
+          parts.push(`<tr>
+            <td>${m.selectionName} (${m.selectionId})</td>
+            <td>${m.decimalOdds}</td>
+            <td>${m.modelProbability}</td>
+            <td class="${evClass}">${rec.ev}</td>
+            <td>${(rec.kellyFraction*100 || 0).toFixed(2)}%</td>
+            <td>${rec.stake}</td>
+            <td><button onclick="confirmBet('${rec.recId}', '${m.selectionId}')">Confirm</button></td>
+          </tr>`);
+        }
+        parts.push('</table>');
+      }
+      eventsDiv.innerHTML = parts.join('');
+    }
+
+    function renderPending() {
+      const items = Object.values(pending).sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
+      if (items.length === 0) { pendingDiv.innerHTML = '<i>No pending recommendations</i>'; return; }
+      const rows = items.map(r => `
+        <div style="border:1px solid #ddd; padding:8px; margin-bottom:6px;">
+          <b>${r.selectionName}</b> (${r.selectionId}) — stake: ${r.stake} odds: ${r.decimalOdds} — status: ${r.status}
+          <div style="margin-top:6px;">
+            <button onclick="confirmBet('${r.recId}','${r.selectionId}')">Confirm</button>
+          </div>
+        </div>
+      `);
+      pendingDiv.innerHTML = rows.join('');
+    }
+
+    async function enableLive() {
+      const token = liveTokenInput.value.trim();
+      if (!token) return alert('Enter the LIVE token from your server environment (LIVE_MODE_TOKEN)');
+      try {
+        const resp = await fetch('/enable_live', {
+          method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ token })
+        });
+        const data = await resp.json();
+        if (data.status === 'ok' && data.liveEnabled) {
+          liveEnabled = true;
+          liveBanner.style.display = 'block';
+          liveBanner.innerText = 'LIVE MODE ENABLED — real bets may be placed. Proceed with extreme caution.';
+          alert('Live mode enabled on server. Confirmations will attempt real placement.');
+        } else {
+          alert('Enable failed: ' + (data.error || JSON.stringify(data)));
+        }
+      } catch (e) { alert('Enable request failed: ' + e.message); }
+    }
+
+    async function confirmBet(recId, selectionId) {
+      const confirmMsg = confirm('Confirm placing a bet for recId=' + recId + '? If live mode is enabled this will place a real order.');
+      if (!confirmMsg) return;
+      try {
+        const resp = await fetch('/confirm_bet', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ recId, bookmaker: 'betfair', marketId: '' })
+        });
+        const data = await resp.json();
+        alert('Server response: ' + JSON.stringify(data));
+      } catch (e) {
+        alert('Confirm failed: ' + e.message);
+      }
+    }
+
+    socket.on('initial_state', (data) => {
+      bankrollEl.innerText = data.bankroll.toFixed(2);
+      Object.assign(events, data.events || {});
+      for (const r of data.pending || []) pending[r.recId] = r;
+      liveEnabled = !!data.liveEnabled;
+      if (liveEnabled) { liveBanner.style.display = 'block'; liveBanner.innerText = 'LIVE MODE ENABLED — real bets may be placed.'; }
+      renderEvents(); renderPending();
+    });
+
+    socket.on('odds_update', (msg) => {
+      const { eventId, market, recommendation } = msg;
+      events[eventId] = events[eventId] || { name: msg.name || eventId, markets: {} };
+      events[eventId].markets[market.selectionId] = Object.assign({}, market, { recommendation });
+      pending[recommendation.recId] = recommendation;
+      renderEvents(); renderPending();
+    });
+
+    socket.on('recommendation_update', (rec) => { pending[rec.recId] = rec; renderPending(); });
+    socket.on('bankroll_update', (s) => { bankrollEl.innerText = s.bankroll.toFixed(2); });
+    socket.on('live_mode', (s) => { liveEnabled = s.liveEnabled; if (liveEnabled) { liveBanner.style.display='block'; liveBanner.innerText='LIVE MODE ENABLED — real bets may be placed.'; } });
+  </script>
+</body>
+</html>
