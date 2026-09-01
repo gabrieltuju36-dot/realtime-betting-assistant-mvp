@@ -11,6 +11,8 @@
     .col { flex:1; }
     button { padding:8px 12px; }
     .card { border:1px solid #ddd; padding:8px; margin-bottom:8px; }
+    .suggestions { margin-top:8px; }
+    .suggestion { padding:6px; border:1px dashed #ccc; margin-bottom:6px; cursor:pointer; }
   </style>
 </head>
 <body>
@@ -46,8 +48,22 @@
       const j = await r.json();
       const node = document.getElementById('unmapped');
       if (!j.unmapped || j.unmapped.length===0) { node.innerHTML = '<i>None</i>'; return; }
-      node.innerHTML = j.unmapped.map(u => `<div class="card"><b>${u.selectionName}</b> (${u.selectionId})<br/>source: ${u.source}<br/>sourceMarketId: ${u.sourceMarketId}<br/>recId: ${u.recId}<br/><small>${u.createdAt}</small></div>`).join('');
+      node.innerHTML = j.unmapped.map(u => `
+        <div class="card" id="card-${u.recId}">
+          <b>${u.selectionName}</b> (${u.selectionId})<br/>source: ${u.source}<br/>sourceMarketId: ${u.sourceMarketId}<br/>recId: ${u.recId}<br/><small>${u.createdAt}</small>
+          <div style="margin-top:8px;">
+            <button onclick="prefillFromRec('${u.source}','${u.sourceMarketId}','${escapeJs(u.selectionName)}','${escapeJs(u.eventId)}')">Prefill Form</button>
+            <button onclick="suggestFor('${u.recId}','${escapeJs(u.selectionName)}','${escapeJs(u.eventId)}')">Suggest</button>
+          </div>
+          <div class="suggestions" id="sugg-${u.recId}"></div>
+        </div>
+      `).join('');
     }
+
+    function escapeJs(s) {
+      return (s||'').replace(/'/g, "\\'").replace(/\"/g,'\\\"');
+    }
+
     async function loadMappings() {
       const r = await fetch('/mappings');
       const j = await r.json();
@@ -55,6 +71,43 @@
       if (!j.mappings || j.mappings.length===0) { node.innerHTML = '<i>None</i>'; return; }
       node.innerHTML = j.mappings.map(m => `<div class="card"><b>${m.source}</b> - ${m.sourceMarketId}<br/>canonical: ${m.canonicalEventId} / ${m.canonicalSelectionId}<br/>betfair: ${m.betfairMarketId} / ${m.betfairSelectionId}<br/><small>mapped at ${m.mappedAt}</small></div>`).join('');
     }
+
+    function prefillFromRec(source, sourceMarketId, selectionName, eventId) {
+      document.getElementById('src').value = source;
+      document.getElementById('srcId').value = sourceMarketId;
+      document.getElementById('canEvent').value = eventId || '';
+      document.getElementById('canSel').value = selectionName || '';
+    }
+
+    async function suggestFor(recId, selectionName, eventId) {
+      const container = document.getElementById('sugg-' + recId);
+      container.innerHTML = 'Searching suggestions...';
+      try {
+        const resp = await fetch('/suggest_mapping', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ selectionName, eventName: eventId }) });
+        const data = await resp.json();
+        if (!data.suggestions || data.suggestions.length===0) { container.innerHTML = '<i>No suggestions found</i>'; return; }
+        container.innerHTML = data.suggestions.map(s => {
+          const m = s.mapping;
+          return `<div class="suggestion" onclick='applySuggestion(${JSON.stringify(m)})'>
+            <b>Score:</b> ${(s.score||0).toFixed(2)} — <b>betfair:</b> ${m.betfairMarketId}/${m.betfairSelectionId} — <b>canonical:</b> ${m.canonicalEventId}/${m.canonicalSelectionId}
+          </div>`;
+        }).join('');
+      } catch (e) {
+        container.innerHTML = 'Suggestion request failed: ' + e.message;
+      }
+    }
+
+    function applySuggestion(mapping) {
+      // mapping is the suggested mapping object
+      document.getElementById('src').value = mapping.source || 'betpawa';
+      document.getElementById('srcId').value = mapping.sourceMarketId || '';
+      document.getElementById('canEvent').value = mapping.canonicalEventId || '';
+      document.getElementById('canSel').value = mapping.canonicalSelectionId || '';
+      document.getElementById('bfMarket').value = mapping.betfairMarketId || '';
+      document.getElementById('bfSel').value = mapping.betfairSelectionId || '';
+      alert('Form prefilled from suggestion — verify and click Add Mapping');
+    }
+
     async function addMapping() {
       const body = {
         source: document.getElementById('src').value,

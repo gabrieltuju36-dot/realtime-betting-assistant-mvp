@@ -59,6 +59,22 @@ function findMappingForSource(source, sourceMarketId) {
   return mappings.find(m => m.source === source && m.sourceMarketId === sourceMarketId) || null;
 }
 
+function normalizeText(s) {
+  if (!s) return '';
+  return s.toString().toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function jaccardSimilarity(a, b) {
+  if (!a || !b) return 0;
+  const as = new Set(normalizeText(a).split(' ').filter(Boolean));
+  const bs = new Set(normalizeText(b).split(' ').filter(Boolean));
+  if (as.size === 0 || bs.size === 0) return 0;
+  let inter = 0;
+  for (const x of as) if (bs.has(x)) inter++;
+  const uni = new Set([...as, ...bs]).size;
+  return inter / uni;
+}
+
 function recommendBet(eventId, market) {
   const b = market.decimalOdds - 1;
   const p = market.modelProbability;
@@ -112,6 +128,48 @@ app.post('/odds', (req, res) => {
 // Endpoint for client to list pending recommendations
 app.get('/recommendations', (req, res) => {
   res.json({ recommendations: Object.values(pendingRecommendations) });
+});
+
+// Suggest mapping endpoint - returns candidate mappings based on fuzzy matching
+app.post('/suggest_mapping', (req, res) => {
+  const { source, sourceMarketId, selectionName, eventName } = req.body || {};
+  if (!selectionName && !eventName) return res.status(400).json({ status: 'error', error: 'selectionName or eventName required' });
+
+  // Score existing mappings against the provided names
+  const suggestions = mappings.map(m => {
+    const scoreSel = jaccardSimilarity(selectionName, m.canonicalSelectionId || '');
+    const scoreEvent = jaccardSimilarity(eventName, m.canonicalEventId || '');
+    const score = Math.max(scoreSel, scoreEvent);
+    return { mapping: m, score, scoreSel, scoreEvent };
+  }).filter(s => s.score > 0)
+    .sort((a,b) => b.score - a.score)
+    .slice(0, 20);
+
+  // Also try to find similar entries from already-mapped pending recommendations
+  const mappedFromPending = Object.values(pendingRecommendations)
+    .map(rec => ({ rec, map: findMappingForSource(rec.source, rec.sourceMarketId) }))
+    .filter(x => x.map)
+    .map(x => {
+      const m = x.map;
+      const scoreSel = jaccardSimilarity(selectionName, m.canonicalSelectionId || '');
+      const scoreEvent = jaccardSimilarity(eventName, m.canonicalEventId || '');
+      const score = Math.max(scoreSel, scoreEvent);
+      return { mapping: m, sourceRec: x.rec, score, scoreSel, scoreEvent };
+    }).filter(s => s.score > 0)
+    .sort((a,b) => b.score - a.score)
+    .slice(0,20);
+
+  // Merge suggestions, preferring higher score and uniqueness by betfairMarketId + betfairSelectionId
+  const seen = new Set();
+  const merged = [];
+  for (const s of [...suggestions, ...mappedFromPending]) {
+    const key = `${s.mapping.betfairMarketId}::${s.mapping.betfairSelectionId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(s);
+  }
+
+  res.json({ suggestions: merged });
 });
 
 // Mappings endpoints
